@@ -1,0 +1,13 @@
+version: "3.9"
+services:
+  internet-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: internet-monitor:latest
+    environment:
+      MODE: "${MODE:-server}"
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    restart: unless-stopped

@@ -1,0 +1,8 @@
+# .dockerignore
+build/
+*.sln
+*.vcxproj*
+.vs/
+.DS_Store
+*.log
+*.tmp

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Мониторинг</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #ddd;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 500;
+        }
+        .subtitle {
+            font-size: 13px;
+            color: #666;
+            margin-left: 15px;
+        }
+        .ws-status {
+            font-size: 13px;
+            color: #4CAF50;
+        }
+        .ws-status.error {
+            color: #F44336;
+        }
+        #map {
+            width: 100%;
+            height: 600px;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .metrics {
+            margin-top: 20px;
+            padding: 15px;
+            background: #fff;
+            border-radius: 4px;
+            font-size: 13px;
+            line-height: 1.8;
+        }
+        .metrics span {
+            margin-right: 30px;
+        }
+        .metric-label {
+            color: #666;
+        }
+        .metric-value {
+            font-weight: 600;
+            color: #2196F3;
+        }
+    </style>
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=ваш_API_ключ&lang=ru_RU" type="text/javascript"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>Мониторинг</h1>
+                <span class="subtitle">Данные обновляются в реальном времени</span>
+            </div>
+            <div id="wsStatus" class="ws-status">WS: подключение...</div>
+        </header>
+
+        <div id="map"></div>
+
+        <div class="metrics">
+            <span><span class="metric-label">Глубина очереди:</span> <span id="queueDepth" class="metric-value">0</span></span>
+            <span><span class="metric-label">Обработано:</span> <span id="totalEvents" class="metric-value">0</span></span>
+            <span><span class="metric-label">Средняя доступность:</span> <span id="avgAvailability" class="metric-value">0%</span></span>
+            <span><span class="metric-label">Потери:</span> <span id="dropRate" class="metric-value">0%</span></span>
+        </div>
+    </div>
+
+    <script>
+        ymaps.ready(init);
+
+        var myMap;
+        var cellRects = {};
+        var ws;
+        var totalEvents = 0;
+        var cellStates = {};
+        var sw = [56.76, 60.48];
+        var ne = [56.92, 60.72];
+        var rows = 8;
+        var cols = 8;
+        var centerLat = (sw[0] + ne[0]) / 2;
+        var centerLon = (sw[1] + ne[1]) / 2;
+
+        function init() {
+            myMap = new ymaps.Map("map", {
+                center: [56.8389, 60.6057],
+                zoom: 10,
+                controls: ['zoomControl', 'fullscreenControl']
+            });
+
+            var latStep = (ne[0] - sw[0]) / rows;
+            var lonStep = (ne[1] - sw[1]) / cols;
+
+            for (var r = 0; r < rows; r++) {
+                for (var c = 0; c < cols; c++) {
+                    var lat1 = sw[0] + r * latStep;
+                    var lon1 = sw[1] + c * lonStep;
+                    var lat2 = lat1 + latStep;
+                    var lon2 = lon1 + lonStep;
+                    var cellId = r + "-" + c;
+
+                    var rect = new ymaps.Rectangle([[lat1, lon1], [lat2, lon2]], {
+                        hintContent: 'Ячейка ' + cellId + ': Нет данных'
+                    }, {
+                        fillColor: '#e2e8f0',
+                        fillOpacity: 0.35,
+                        strokeColor: '#ffffff',
+                        strokeWidth: 1,
+                        strokeOpacity: 0.3
+                    });
+
+                    myMap.geoObjects.add(rect);
+                    cellRects[cellId] = { rect: rect, avail: 0, active: false };
+                }
+            }
+
+            connectWebSocket();
+            startMetricsPolling();
+        }
+
+        function getColorForAvailability(avail) {
+            if (avail > 80) return '#4CAF50';
+            if (avail > 50) return '#FFC107';
+            return '#F44336';
+        }
+
+        function updateCell(cellId, availability) {
+            var data = cellRects[cellId];
+            if (!data) return;
+
+            var color = getColorForAvailability(availability);
+            var opacity = availability > 50 ? 0.45 : 0.5;
+
+            data.rect.options.set('fillColor', color);
+            data.rect.options.set('fillOpacity', opacity);
+            data.rect.properties.set('hintContent', 'Ячейка ' + cellId + ': ' + availability.toFixed(1) + '%');
+            data.rect.properties.set('balloonContent', '<strong>Ячейка ' + cellId + '</strong><br>Доступность: ' + availability.toFixed(1) + '%');
+            
+            data.avail = availability;
+            data.active = true;
+            
+            updateMetricsDisplay();
+        }
+
+        function updateMetricsDisplay() {
+            var activeCount = 0;
+            var totalAvail = 0;
+            
+            for (var id in cellRects) {
+                if (cellRects[id].active) {
+                    activeCount++;
+                    totalAvail += cellRects[id].avail;
+                }
+            }
+            
+            var avg = activeCount > 0 ? (totalAvail / activeCount).toFixed(1) : 0;
+            document.getElementById('avgAvailability').textContent = avg + '%';
+            document.getElementById('totalEvents').textContent = totalEvents.toLocaleString();
+        }
+
+        function connectWebSocket() {
+            var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            var wsUrl = protocol + '//' + window.location.host + '/ws';
+            
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = function() {
+                var statusEl = document.getElementById('wsStatus');
+                statusEl.textContent = 'WS: подключено';
+                statusEl.className = 'ws-status';
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    var data = JSON.parse(event.data);
+                    totalEvents++;
+                    
+                    if (data.deltas && Array.isArray(data.deltas)) {
+                        for (var i = 0; i < data.deltas.length; i++) {
+                            var delta = data.deltas[i];
+                            if (delta.cell_id && typeof delta.availability === 'number') {
+                                updateCell(delta.cell_id, delta.availability * 100);
+                            }
+                        }
+                    }
+                    
+                    if (data.metrics) {
+                        var m = data.metrics;
+                        if (m.queue_depth !== undefined) {
+                            document.getElementById('queueDepth').textContent = m.queue_depth;
+                        }
+                        if (m.drop_rate !== undefined) {
+                            document.getElementById('dropRate').textContent = (m.drop_rate * 100).toFixed(2) + '%';
+                        }
+                    }
+                } catch (e) {
+                    console.error('WS parse error:', e);
+                }
+            };
+
+            ws.onclose = function() {
+                var statusEl = document.getElementById('wsStatus');
+                statusEl.textContent = 'WS: отключено';
+                statusEl.className = 'ws-status error';
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = function(error) {
+                console.error('WS error:', error);
+            };
+        }
+
+        function startMetricsPolling() {
+            setInterval(function() {
+                fetch('/metrics')
+                    .then(function(response) { return response.text(); })
+                    .then(function(text) {
+                        var queueMatch = text.match(/monitor_queue_depth\s+(\d+)/);
+                        var droppedMatch = text.match(/monitor_dropped_samples_total\s+(\d+)/);
+                        
+                        if (queueMatch) {
+                            document.getElementById('queueDepth').textContent = queueMatch[1];
+                        }
+                        if (droppedMatch) {
+                            var dropped = parseInt(droppedMatch[1]);
+                            var processed = totalEvents || 1;
+                            var rate = ((dropped / (processed + dropped)) * 100).toFixed(2);
+                            document.getElementById('dropRate').textContent = rate + '%';
+                        }
+                    })
+                    .catch(function() {});
+            }, 5000);
+        }
+    </script>
+</body>
+</html>
